@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 )
 
@@ -30,7 +31,11 @@ var modifyReqPool = make([]*string, 0)
 var respPool = make([]*responseInf, 0)
 
 // curl -x http://127.0.0.1:8080 http://mail.ru
-
+//
+//	curl -X POST \
+//	 -x http://127.0.0.1:8080 \
+//	 http://mail.ru \
+//	 -d 'key1=value1&key2=value2'
 func main() {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -99,12 +104,17 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := net.Dial("tcp", targetURL.Host+":80")
+	port := ""
+	if strings.Index(targetURL.Host, ":") == -1 {
+		port = ":80"
+	}
+
+	conn, err := net.Dial("tcp", targetURL.Host+port)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	request := "GET / HTTP/1.1\r\n" +
+	request := r.Method + " / HTTP/1.1\r\n" +
 		"Host: " + targetURL.Host + "\r\n"
 
 	for header, values := range r.Header {
