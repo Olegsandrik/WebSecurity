@@ -1,5 +1,4 @@
 ## Команда для запуска прокси через Makefile в репе
 ### Make
 
-## Визуализация запросов 
-### http://localhost:8000/requests
+Тестил на mail.ru и stepik.ru, gmail.com на авторизацию через chrome, все работало)
