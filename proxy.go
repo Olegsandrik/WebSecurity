@@ -1,20 +1,26 @@
 package main
 
 import (
+	"bufio"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
-	"os/exec"
-	"strconv"
+	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
-var counter = 20
+var counter = big.NewInt(10000000000)
 
 type ProxyServer struct {
 	Addr      string
@@ -31,7 +37,7 @@ func (p *ProxyServer) Start() {
 		Handler: http.HandlerFunc(p.handleConnect),
 	}
 
-	log.Println("Starting proxy on port", p.Addr)
+	log.Println("Старт прокси на", p.Addr)
 	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
@@ -41,7 +47,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "CONNECT" {
 		p.handleHTTPSConn(w, r)
 	} else {
-		fmt.Println("Only support CONNECT")
+		fmt.Println("Поддержка только CONNECT-соединений")
 	}
 }
 
@@ -57,30 +63,30 @@ func (p *ProxyServer) handleHTTPSConn(w http.ResponseWriter, r *http.Request) {
 
 	connClient, _, err := hij.Hijack()
 	if err != nil {
-		http.Error(w, "Error hijacking connection", http.StatusServiceUnavailable)
+		http.Error(w, "Ошибка  hijack-соедиения", http.StatusServiceUnavailable)
 		return
 	}
 	defer connClient.Close()
 
 	_, err = connClient.Write([]byte("HTTP/1.0 200 Connection established\r\n\r\n"))
 	if err != nil {
-		log.Println("Failed to send connection established:", err)
+		log.Println("Ошибка отправки удачного соединения:", err)
 		return
 	}
 
 	connServ, err := net.Dial("tcp", r.Host)
 	if err != nil {
-		log.Println("Failed to connect to destination:", err)
+		log.Println("Ошибка соединения с хостом:", err)
 		return
 	}
 	defer connServ.Close()
 
 	certPair, err := p.genCertificate(host)
 	if err != nil {
-		log.Print("Failed to load certificate ", err)
+		log.Print("Ошибка загрузки сертификата ", err)
 		return
 	}
-	log.Print("Successfully loaded certificate")
+	log.Print("Успешная загрузка сертификата")
 
 	tlsConf := &tls.Config{
 		Certificates: []tls.Certificate{certPair},
@@ -91,7 +97,7 @@ func (p *ProxyServer) handleHTTPSConn(w http.ResponseWriter, r *http.Request) {
 	tlsConnClient := tls.Server(connClient, tlsConf)
 	err = tlsConnClient.Handshake()
 	if err != nil {
-		log.Println("TLS handshake with client failed:", err)
+		log.Println("TLS рукопожатие с клиентом не получилось:", err)
 		return
 	}
 	defer tlsConnClient.Close()
@@ -99,7 +105,7 @@ func (p *ProxyServer) handleHTTPSConn(w http.ResponseWriter, r *http.Request) {
 	tlsConnServ := tls.Client(connServ, &tls.Config{InsecureSkipVerify: true})
 	err = tlsConnServ.Handshake()
 	if err != nil {
-		log.Println("TLS handshake with server failed:", err)
+		log.Println("TLS рукопожатие с сервером не получилось:", err)
 		return
 	}
 	defer tlsConnServ.Close()
@@ -123,41 +129,111 @@ func (p *ProxyServer) handleHTTPSConn(w http.ResponseWriter, r *http.Request) {
 	tlsConnServ.Close()
 }
 
+func readFileLineByLine(filename string) ([]byte, error) {
+	var content []byte
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		content = append(content, scanner.Bytes()...)
+		content = append(content, '\n')
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return content, nil
+}
+
 func (p *ProxyServer) genCertificate(host string) (tls.Certificate, error) {
 	commonName := host
-	counter++
-	serialNumber := strconv.Itoa(counter)
+	counter.Add(counter, big.NewInt(1))
+	serialNumber := counter
 
-	// Генерация сертификата
-	cmd := exec.Command("./gen_cert.sh", commonName, serialNumber)
-	output, err := cmd.CombinedOutput()
+	caCertBYTES, err := readFileLineByLine("rootCA.crt")
 	if err != nil {
-		log.Printf("Command execution failed: %s\nOutput: %s\n", err, output)
-		return tls.Certificate{}, fmt.Errorf("failed to generate certificate: %w", err)
+		return tls.Certificate{}, fmt.Errorf("ошибка чтения корневого сертификата: %v", err)
 	}
 
-	// Чтение сертификата и ключа
-	cert, err := ioutil.ReadFile("certs/" + host + ".crt")
+	caKeyBYTES, err := readFileLineByLine("rootCA.key")
 	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("failed to read cert.crt: %w", err)
-	}
-	key, err := ioutil.ReadFile("certs/" + host + ".key")
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("failed to read cert.key: %w", err)
+		return tls.Certificate{}, fmt.Errorf("ошибка чтения корневого ключа: %v", err)
 	}
 
-	/*
-		defer os.Remove("certs/" + host + ".crt")
-		defer os.Remove("certs/" + host + ".key")
-	*/
+	caCertBlock, _ := pem.Decode(caCertBYTES)
+	caKeyBlock, _ := pem.Decode(caKeyBYTES)
 
-	certPair, err := tls.X509KeyPair(cert, key)
+	caCert, err := x509.ParseCertificate(caCertBlock.Bytes)
 	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("failed to parse certificate pair: %w", err)
+		return tls.Certificate{}, fmt.Errorf("ошибка с корневый сертификатом: %v", err)
 	}
 
-	log.Println("Successfully used certificate for:", commonName)
-	return certPair, nil
+	caKey, err := x509.ParsePKCS8PrivateKey(caKeyBlock.Bytes)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("ошибка с корневым ключом: %v", err)
+	}
+
+	hostPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("ошибка генерации приватного ключа для хоста: %v", err)
+	}
+
+	hostCertTemplate := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName: commonName,
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().AddDate(1, 0, 0),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{host},
+	}
+
+	hostCertBytes, err := x509.CreateCertificate(rand.Reader, hostCertTemplate, caCert, &hostPrivateKey.PublicKey, caKey)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("ошибка создания сертификата: %v", err)
+	}
+
+	hostCertFile, err := os.Create(fmt.Sprintf("certs/%s.crt", host))
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("ошибка создания файла сертификата: %v", err)
+	}
+	defer hostCertFile.Close()
+
+	err = pem.Encode(hostCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: hostCertBytes})
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("ошибка записи сертификата в файл: %v", err)
+	}
+
+	hostKeyFile, err := os.Create(fmt.Sprintf("certs/%s.key", host))
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("ошибка создания ключа: %v", err)
+	}
+	defer hostKeyFile.Close()
+
+	err = pem.Encode(hostKeyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(hostPrivateKey)})
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("ошибка записи в файл: %v", err)
+	}
+
+	certFile := fmt.Sprintf("certs/%s.crt", host)
+	certKey := fmt.Sprintf("certs/%s.key", host)
+
+	cert, err := tls.LoadX509KeyPair(certFile, certKey)
+	if err != nil {
+		log.Printf("Ошибка загрузки %s и ключа %s: %v", certFile, certKey, err)
+		return tls.Certificate{}, fmt.Errorf("error: %v", err)
+
+	}
+
+	defer os.Remove("certs/" + host + ".crt")
+	defer os.Remove("certs/" + host + ".key")
+	return cert, nil
 }
 
 func main() {
